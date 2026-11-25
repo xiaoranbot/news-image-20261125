@@ -19,22 +19,30 @@ from binascii import crc32
 WIDTH = 1024
 HEIGHT = 1024
 
-CREAM = (244, 239, 228)
-NAVY = (16, 24, 64)
-NAVY_SOFT = (24, 36, 84)
-INK = (26, 26, 26)
-RED = (178, 34, 34)
-GOLD = (201, 162, 39)
-GOLD_BRIGHT = (232, 184, 32)
-GREEN = (34, 139, 34)
-GREEN_DARK = (27, 94, 32)
-TEAL = (42, 122, 120)
-BLUE_EU = (0, 51, 153)
-SKY = (168, 205, 230)
-SEA = (16, 92, 99)
-ORANGE = (232, 120, 24)
-WHITE = (255, 255, 255)
-GREY_LINE = (201, 196, 184)
+
+def _rgb(hexcode):
+    """Turn a six-digit hex colour into an (R, G, B) triple."""
+    n = int(hexcode, 16)
+    return (n >> 16 & 255, n >> 8 & 255, n & 255)
+
+
+# Palette, as hex codes: cream paper, navy ink, signal red and gold.
+CREAM = _rgb("f4efe4")
+NAVY = _rgb("101840")
+NAVY_SOFT = _rgb("182454")
+INK = _rgb("1a1a1a")
+RED = _rgb("b22222")
+GOLD = _rgb("c9a227")
+GOLD_BRIGHT = _rgb("e8b820")
+GREEN = _rgb("228b22")
+GREEN_DARK = _rgb("1b5e20")
+TEAL = _rgb("2a7a78")
+BLUE_EU = _rgb("003399")
+SKY = _rgb("a8cde6")
+SEA = _rgb("105c63")
+ORANGE = _rgb("e87818")
+WHITE = _rgb("ffffff")
+GREY_LINE = _rgb("c9c4b8")
 
 
 # ---------------------------------------------------------------- PNG writer
@@ -628,10 +636,16 @@ class Page:
 # ------------------------------------------------------------ masthead
 
 def draw_masthead(page):
-    page.rect(24, 24, 976, 88, NAVY)
+    # Title block: navy band, big title left, weekday and date right.
+    band = (24, 24, 976, 88)
+    page.rect(*band, NAVY)
     page.text(48, 48, "THE WORLD TODAY", 6, WHITE)
-    page.text_right(976, 38, "WEDNESDAY", 3, GOLD_BRIGHT)
-    page.text_right(976, 70, "25 NOVEMBER 2026", 3, WHITE)
+    right_column = [
+        ("WEDNESDAY", 38, GOLD_BRIGHT),
+        ("25 NOVEMBER 2026", 70, WHITE),
+    ]
+    for label, row, tint in right_column:
+        page.text_right(976, row, label, 3, tint)
     page.hline(24, 120, 976, RED, 6)
 
 
@@ -693,6 +707,11 @@ def draw_top_story(page):
 
 # ------------------------------------------------------------ middle row
 
+def draw_sun(page, sx, sy):
+    """A low pale sun shared by the two sea panels."""
+    page.disc(sx, sy, 16, (240, 214, 130))
+
+
 def draw_mine(page, mx, my, mr, color):
     """A spiked naval mine: dark disc with eight spikes."""
     page.disc(mx, my, mr, color)
@@ -707,7 +726,7 @@ def draw_hormuz(page, ox, oy, ow, oh):
     """Strait of Hormuz: sky and sea, a tanker, mines and a blast."""
     page.rect(ox, oy, ow, oh // 2, SKY)
     page.rect(ox, oy + oh // 2, ow, oh - oh // 2, SEA)
-    page.disc(ox + ow - 52, oy + 26, 16, (240, 214, 130))  # low sun
+    draw_sun(page, ox + ow - 52, oy + 26)
     # tanker silhouette
     hx, hy = ox + 60, oy + oh // 2 + 8
     page.rect(hx, hy, 150, 26, INK)
@@ -730,7 +749,7 @@ def draw_gulf_strike(page, ox, oy, ow, oh):
     """Gulf of Finland: sky and sea, a cargo ship, a drone overhead."""
     page.rect(ox, oy, ow, oh // 2, SKY)
     page.rect(ox, oy + oh // 2, ow, oh - oh // 2, SEA)
-    page.disc(ox + 52, oy + 26, 16, (240, 214, 130))  # low sun
+    draw_sun(page, ox + 52, oy + 26)
     # cargo ship silhouette
     hx, hy = ox + 96, oy + oh // 2 - 6
     page.rect(hx, hy - 30, 128, 30, INK)
@@ -882,8 +901,8 @@ def build_page():
     return page
 
 
-def main():
-    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "out")
+def render_entry(out_dir):
+    """Build the page, encode it, and write entry.png into out_dir."""
     os.makedirs(out_dir, exist_ok=True)
     page = build_page()
     data = encode_png(bytes(page.pixels), WIDTH, HEIGHT)
@@ -891,7 +910,13 @@ def main():
     with open(path, "wb") as handle:
         handle.write(data)
     os.chmod(path, 0o644)
-    print("wrote {} ({} bytes)".format(path, len(data)))
+    return path, len(data)
+
+
+def main():
+    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "out")
+    path, size = render_entry(out_dir)
+    print("wrote {} ({} bytes)".format(path, size))
 
 
 if __name__ == "__main__":
