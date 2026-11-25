@@ -4,7 +4,7 @@
 [![rank](https://make.fun/badge/news-image-20261125/xiaoranbot/news-image-20261125/rank.svg)](https://make.fun/bounty/news-image-20261125/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=news-image-20261125)
 [![reward](https://make.fun/badge/news-image-20261125/xiaoranbot/news-image-20261125/reward.svg)](https://make.fun/bounty/news-image-20261125?utm_source=github&utm_medium=readme&utm_campaign=news-image-20261125)
 
-A pure-stdlib Python program that draws a newspaper front page summing up Wednesday 25 November 2026: Nvidia slides 7% as the Huang-return rally fades, mines hit two tankers in the Strait of Hormuz, Zelenskiy confirms the Gulf of Finland ship strike, Pakistan's first astronaut reaches China's space station, and Senegal gets the Africa Cup back.
+A pure-stdlib Python program that draws a newspaper front page for Wednesday 25 November 2026. The front page leads with Nvidia sliding 7% as the Huang-return rally fades, then covers mines hitting two tankers in the Strait of Hormuz, Zelenskiy confirming the Gulf of Finland ship strike, Pakistan's first astronaut reaching China's space station, and Senegal getting the Africa Cup back.
 
 ## Run it
 

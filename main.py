@@ -42,8 +42,9 @@ GREY_LINE = (201, 196, 184)
 def _png_chunk(kind, payload):
     """One PNG chunk: length, type, data, CRC."""
     body = kind + payload
-    return struct.pack(">I", len(payload)) + body + struct.pack(
-        ">I", crc32(body) & 0xFFFFFFFF)
+    size = len(payload).to_bytes(4, "big")
+    check = (crc32(body) & 0xFFFFFFFF).to_bytes(4, "big")
+    return size + body + check
 
 
 def encode_png(rgb, width, height):
@@ -52,17 +53,16 @@ def encode_png(rgb, width, height):
     Filter type 0 on every scanline and a fixed zlib level keep the
     output byte-for-byte identical across runs.
     """
-    raw = bytearray()
-    stride = width * 3
-    for y in range(height):
-        raw.append(0)
-        raw += rgb[y * stride:(y + 1) * stride]
-    compressed = zlib.compress(bytes(raw), 9)
-    header = struct.pack(">8s", b"\x89PNG\r\n\x1a\n")
-    ihdr = _png_chunk(b"IHDR", struct.pack(
-        ">IIBBBBB", width, height, 8, 2, 0, 0, 0))
-    return header + ihdr + _png_chunk(b"IDAT", compressed) + _png_chunk(
-        b"IEND", b"")
+    row_bytes = width * 3
+    scanlines = bytearray()
+    for yy in range(height):
+        scanlines.append(0)
+        scanlines += rgb[yy * row_bytes:(yy + 1) * row_bytes]
+    blob = zlib.compress(bytes(scanlines), 9)
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    magic = b"\x89PNG\r\n\x1a\n"
+    return (magic + _png_chunk(b"IHDR", ihdr) +
+            _png_chunk(b"IDAT", blob) + _png_chunk(b"IEND", b""))
 
 
 # ------------------------------------------------------------ bitmap font
@@ -515,7 +515,7 @@ CHAR_W = 6  # 5 glyph columns + 1 column of tracking, in font units
 
 def text_width(text, scale):
     """Pixel width of a string at a given scale."""
-    return len(text) * CHAR_W * scale - scale
+    return scale * (len(text) * CHAR_W - 1)
 
 
 class Page:
@@ -526,98 +526,103 @@ class Page:
         self.height = height
         self.pixels = bytearray(background * (width * height))
 
-    def put(self, x, y, color):
-        if 0 <= x < self.width and 0 <= y < self.height:
-            i = (y * self.width + x) * 3
-            self.pixels[i:i + 3] = bytes(color)
+    def put(self, px, py, color):
+        if not (0 <= px < self.width and 0 <= py < self.height):
+            return
+        off = (py * self.width + px) * 3
+        self.pixels[off:off + 3] = bytes(color)
 
-    def rect(self, x, y, w, h, color):
-        for yy in range(y, y + h):
-            for xx in range(x, x + w):
+    def rect(self, rx, ry, rw, rh, color):
+        for yy in range(ry, ry + rh):
+            for xx in range(rx, rx + rw):
                 self.put(xx, yy, color)
 
-    def hline(self, x, y, w, color, thick=1):
-        self.rect(x, y, w, thick, color)
+    def hline(self, hx, hy, hw, color, thick=1):
+        self.rect(hx, hy, hw, thick, color)
 
-    def vline(self, x, y, h, color, thick=1):
-        self.rect(x, y, thick, h, color)
+    def vline(self, vx, vy, vh, color, thick=1):
+        self.rect(vx, vy, thick, vh, color)
 
     def disc(self, cx, cy, r, color):
         """Filled circle, centre (cx, cy), radius r."""
+        rr = r * r
         for yy in range(cy - r, cy + r + 1):
+            dy = yy - cy
             for xx in range(cx - r, cx + r + 1):
-                if (xx - cx) ** 2 + (yy - cy) ** 2 <= r * r:
+                dx = xx - cx
+                if dx * dx + dy * dy <= rr:
                     self.put(xx, yy, color)
 
     def ring(self, cx, cy, r, color, thick=2):
         for yy in range(cy - r - thick, cy + r + thick + 1):
             for xx in range(cx - r - thick, cx + r + thick + 1):
-                d = math.hypot(xx - cx, yy - cy)
-                if r - thick <= d <= r:
+                dist = math.hypot(xx - cx, yy - cy)
+                if r - thick <= dist <= r:
                     self.put(xx, yy, color)
 
     def triangle(self, x0, y0, x1, y1, x2, y2, color):
         """Filled triangle via a scanline walk."""
-        top = min(y0, y1, y2)
-        bottom = max(y0, y1, y2)
-        pts = [(x0, y0), (x1, y1), (x2, y2)]
+        corners = [(x0, y0), (x1, y1), (x2, y2)]
+        top = min(c[1] for c in corners)
+        bottom = max(c[1] for c in corners)
+        edges = ((corners[0], corners[1]),
+                 (corners[1], corners[2]),
+                 (corners[2], corners[0]))
         for yy in range(top, bottom + 1):
-            xs = []
-            for (ax, ay), (bx, by) in ((pts[0], pts[1]),
-                                       (pts[1], pts[2]),
-                                       (pts[2], pts[0])):
+            hits = []
+            for (ax, ay), (bx, by) in edges:
                 if ay == by:
                     continue
                 if min(ay, by) <= yy < max(ay, by):
-                    xs.append(ax + (yy - ay) * (bx - ax) / (by - ay))
-            if len(xs) >= 2:
-                for xx in range(int(min(xs)), int(max(xs)) + 1):
+                    hits.append(ax + (yy - ay) * (bx - ax) / (by - ay))
+            if len(hits) >= 2:
+                for xx in range(int(min(hits)), int(max(hits)) + 1):
                     self.put(xx, yy, color)
 
-    def glyph(self, x, y, char, scale, color):
+    def glyph(self, gx, gy, char, scale, color):
         rows = GLYPHS.get(char)
         if rows is None:
             return
-        for ry, row in enumerate(rows):
-            for rx, cell in enumerate(row):
+        for rnum, row in enumerate(rows):
+            for cnum, cell in enumerate(row):
                 if cell == "#":
-                    self.rect(x + rx * scale, y + ry * scale,
+                    self.rect(gx + cnum * scale, gy + rnum * scale,
                               scale, scale, color)
 
-    def text(self, x, y, string, scale, color):
+    def text(self, tx, ty, string, scale, color):
         """Draw a string; returns the x just past its last glyph."""
-        cx = x
-        for char in string:
-            self.glyph(cx, y, char, scale, color)
-            cx += CHAR_W * scale
-        return cx - scale
+        pen = tx
+        for ch in string:
+            self.glyph(pen, ty, ch, scale, color)
+            pen += CHAR_W * scale
+        return pen - scale
 
-    def text_centered(self, cx, y, string, scale, color):
-        x = cx - text_width(string, scale) // 2
-        return self.text(x, y, string, scale, color)
+    def text_centered(self, mid, ty, string, scale, color):
+        start = mid - text_width(string, scale) // 2
+        return self.text(start, ty, string, scale, color)
 
-    def text_right(self, right, y, string, scale, color):
-        x = right - text_width(string, scale)
-        return self.text(x, y, string, scale, color)
+    def text_right(self, right, ty, string, scale, color):
+        start = right - text_width(string, scale)
+        return self.text(start, ty, string, scale, color)
 
-    def paragraph(self, x, y, string, scale, color, max_width, leading):
+    def paragraph(self, px, py, string, scale, color, max_width, leading):
         """Word-wrap a paragraph; returns the y just past its last line."""
-        words = string.split()
-        lines = []
-        line = ""
-        for word in words:
-            trial = word if not line else line + " " + word
-            if text_width(trial, scale) <= max_width or not line:
-                line = trial
+        wrapped = []
+        current = ""
+        for word in string.split():
+            candidate = word if not current else current + " " + word
+            if text_width(candidate, scale) <= max_width or not current:
+                current = candidate
             else:
-                lines.append(line)
-                line = word
-        if line:
-            lines.append(line)
-        for row in lines:
-            self.text(x, y, row, scale, color)
-            y += leading
-        return y
+                wrapped.append(current)
+                current = word
+        if current:
+            wrapped.append(current)
+        cursor = py
+        for row in wrapped:
+            self.text(px, cursor, row, scale, color)
+            cursor += leading
+        return cursor
 
 
 # ------------------------------------------------------------ masthead
@@ -632,118 +637,117 @@ def draw_masthead(page):
 
 # ------------------------------------------------------------ top story
 
-def draw_chip(page, x, y):
+def draw_chip(page, ox, oy):
     """A green processor with pins, labelled NVDA, on the navy panel."""
-    page.text(x, y, "THE CHIP GIANT", 2, GOLD_BRIGHT)
-    bx, by, bw, bh = x, y + 34, 210, 130
+    page.text(ox, oy, "THE CHIP GIANT", 2, GOLD_BRIGHT)
+    px, py, pw, ph = ox, oy + 34, 210, 130
     # pins around the package
     for i in range(5):
-        page.rect(bx + 18 + i * 38, by - 10, 12, 10, CREAM)
-        page.rect(bx + 18 + i * 38, by + bh, 12, 10, CREAM)
+        page.rect(px + 18 + i * 38, py - 10, 12, 10, CREAM)
+        page.rect(px + 18 + i * 38, py + ph, 12, 10, CREAM)
     for i in range(3):
-        page.rect(bx - 10, by + 18 + i * 38, 10, 12, CREAM)
-        page.rect(bx + bw, by + 18 + i * 38, 10, 12, CREAM)
-    page.rect(bx, by, bw, bh, GREEN)
-    page.rect(bx + 10, by + 10, bw - 20, bh - 20, GREEN_DARK)
-    page.text_centered(bx + bw // 2, by + 44, "NVDA", 5, WHITE)
-    page.text_centered(bx + bw // 2, by + 96, "NVIDIA", 2, CREAM)
+        page.rect(px - 10, py + 18 + i * 38, 10, 12, CREAM)
+        page.rect(px + pw, py + 18 + i * 38, 10, 12, CREAM)
+    page.rect(px, py, pw, ph, GREEN)
+    page.rect(px + 10, py + 10, pw - 20, ph - 20, GREEN_DARK)
+    page.text_centered(px + pw // 2, py + 44, "NVDA", 5, WHITE)
+    page.text_centered(px + pw // 2, py + 96, "NVIDIA", 2, CREAM)
 
 
-def draw_bars(page, x, y):
+def draw_bars(page, ox, oy):
     """Five falling bars for the share-price slide, last one in red."""
     heights = [100, 80, 62, 44, 26]
     colors = [GREEN, GREEN, TEAL, TEAL, RED]
-    for i, h in enumerate(heights):
-        page.rect(x + i * 42, y + 100 - h, 30, h, colors[i])
+    for i, tall in enumerate(heights):
+        page.rect(ox + i * 42, oy + 100 - tall, 30, tall, colors[i])
 
 
 def draw_top_story(page):
     top = 136
-    bottom = 500
     # left: navy illustration panel
-    page.rect(24, top, 476, bottom - top, NAVY)
+    page.rect(24, top, 476, 500 - top, NAVY)
     draw_chip(page, 84, top + 22)
     draw_bars(page, 84, top + 226)
     page.text(312, top + 262, "-7%", 6, RED)
     page.text(316, top + 306, "IN ONE DAY", 2, CREAM)
     # right: headline column
-    x = 524
-    page.text(x, top + 6, "TECH - MARKETS", 2, RED)
-    page.text(x, top + 34, "THE RALLY FADES", 5, INK)
-    page.paragraph(x, top + 108, "NVDA SLIDES 7% AS CONGRESS QUESTIONS "
+    col = 524
+    page.text(col, top + 6, "TECH - MARKETS", 2, RED)
+    page.text(col, top + 34, "THE RALLY FADES", 5, INK)
+    page.paragraph(col, top + 108, "NVDA SLIDES 7% AS CONGRESS QUESTIONS "
                    "HUANG RETURN",
                    3, INK, 476, 34)
     page.paragraph(
-        x, top + 196,
+        col, top + 196,
         "NVIDIA SHARES FELL ABOUT 7% ON TUESDAY AS THE RALLY FROM "
         "JENSEN HUANG'S RETURN FADED AND LAWMAKERS QUESTIONED "
         "PRESIDENT TRUMP'S ROLE IN BRINGING HIM BACK. ASIAN TECH "
         "STOCKS FELL WITH IT.",
         2, INK, 476, 22)
-    page.rect(x, top + 316, 200, 34, RED)
-    page.text_centered(x + 100, top + 326, "NVDA -7%", 2, WHITE)
-    page.rect(x + 220, top + 316, 220, 34, NAVY)
-    page.text_centered(x + 330, top + 326, "NIKKEI -2.76%", 2, WHITE)
+    page.rect(col, top + 316, 200, 34, RED)
+    page.text_centered(col + 100, top + 326, "NVDA -7%", 2, WHITE)
+    page.rect(col + 220, top + 316, 220, 34, NAVY)
+    page.text_centered(col + 330, top + 326, "NIKKEI -2.76%", 2, WHITE)
     page.hline(24, 514, 976, GREY_LINE, 2)
 
 
 # ------------------------------------------------------------ middle row
 
-def draw_mine(page, cx, cy, r, color):
+def draw_mine(page, mx, my, mr, color):
     """A spiked naval mine: dark disc with eight spikes."""
-    page.disc(cx, cy, r, color)
-    for i in range(8):
-        angle = i * math.pi / 4
-        sx = cx + int((r + 5) * math.cos(angle))
-        sy = cy + int((r + 5) * math.sin(angle))
+    page.disc(mx, my, mr, color)
+    for k in range(8):
+        ang = k * math.pi / 4
+        sx = mx + int((mr + 5) * math.cos(ang))
+        sy = my + int((mr + 5) * math.sin(ang))
         page.disc(sx, sy, 2, color)
 
 
-def draw_hormuz(page, x, y, w, h):
+def draw_hormuz(page, ox, oy, ow, oh):
     """Strait of Hormuz: sky and sea, a tanker, mines and a blast."""
-    page.rect(x, y, w, h // 2, SKY)
-    page.rect(x, y + h // 2, w, h - h // 2, SEA)
-    page.disc(x + w - 52, y + 26, 16, (240, 214, 130))  # low sun
+    page.rect(ox, oy, ow, oh // 2, SKY)
+    page.rect(ox, oy + oh // 2, ow, oh - oh // 2, SEA)
+    page.disc(ox + ow - 52, oy + 26, 16, (240, 214, 130))  # low sun
     # tanker silhouette
-    sx, sy = x + 60, y + h // 2 + 8
-    page.rect(sx, sy, 150, 26, INK)
-    page.rect(sx + 110, sy - 22, 26, 22, INK)
-    page.rect(sx + 116, sy - 34, 14, 12, INK)
-    page.triangle(sx - 24, sy + 26, sx, sy, sx, sy + 26, INK)
+    hx, hy = ox + 60, oy + oh // 2 + 8
+    page.rect(hx, hy, 150, 26, INK)
+    page.rect(hx + 110, hy - 22, 26, 22, INK)
+    page.rect(hx + 116, hy - 34, 14, 12, INK)
+    page.triangle(hx - 24, hy + 26, hx, hy, hx, hy + 26, INK)
     # mines floating in the strait
-    draw_mine(page, x + 268, y + h - 26, 9, INK)
-    draw_mine(page, x + 330, y + h - 18, 7, INK)
+    draw_mine(page, ox + 268, oy + oh - 26, 9, INK)
+    draw_mine(page, ox + 330, oy + oh - 18, 7, INK)
     # blast where a mine struck
-    page.disc(sx + 196, sy - 8, 14, ORANGE)
-    page.disc(sx + 212, sy - 20, 8, GOLD_BRIGHT)
-    page.disc(sx + 186, sy - 22, 5, RED)
+    page.disc(hx + 196, hy - 8, 14, ORANGE)
+    page.disc(hx + 212, hy - 20, 8, GOLD_BRIGHT)
+    page.disc(hx + 186, hy - 22, 5, RED)
     # wake lines
-    for i, wy in enumerate((y + h - 30, y + h - 20, y + h - 10)):
-        page.hline(x + 40 + i * 40, wy, w - 100 - i * 40, CREAM, 2)
+    for i, wy in enumerate((oy + oh - 30, oy + oh - 20, oy + oh - 10)):
+        page.hline(ox + 40 + i * 40, wy, ow - 100 - i * 40, CREAM, 2)
 
 
-def draw_gulf_strike(page, x, y, w, h):
+def draw_gulf_strike(page, ox, oy, ow, oh):
     """Gulf of Finland: sky and sea, a cargo ship, a drone overhead."""
-    page.rect(x, y, w, h // 2, SKY)
-    page.rect(x, y + h // 2, w, h - h // 2, SEA)
-    page.disc(x + 52, y + 26, 16, (240, 214, 130))  # low sun
+    page.rect(ox, oy, ow, oh // 2, SKY)
+    page.rect(ox, oy + oh // 2, ow, oh - oh // 2, SEA)
+    page.disc(ox + 52, oy + 26, 16, (240, 214, 130))  # low sun
     # cargo ship silhouette
-    sx, sy = x + 96, y + h // 2 - 6
-    page.rect(sx, sy - 30, 128, 30, INK)
-    page.rect(sx + 20, sy - 52, 30, 22, INK)
-    page.rect(sx + 62, sy - 44, 22, 14, INK)
-    page.vline(sx + 34, sy - 70, 18, INK, 3)
-    page.triangle(sx - 26, sy, sx, sy - 30, sx, sy, INK)
+    hx, hy = ox + 96, oy + oh // 2 - 6
+    page.rect(hx, hy - 30, 128, 30, INK)
+    page.rect(hx + 20, hy - 52, 30, 22, INK)
+    page.rect(hx + 62, hy - 44, 22, 14, INK)
+    page.vline(hx + 34, hy - 70, 18, INK, 3)
+    page.triangle(hx - 26, hy, hx, hy - 30, hx, hy, INK)
     # drone above the ship, with spinning rotors
-    dx, dy = sx + 150, y + 22
+    dx, dy = hx + 150, oy + 22
     page.disc(dx, dy, 6, INK)
     page.rect(dx - 22, dy - 2, 44, 3, INK)
     page.disc(dx - 24, dy, 5, INK)
     page.disc(dx + 24, dy, 5, INK)
     page.rect(dx - 3, dy + 6, 6, 8, RED)
     # wake lines
-    for i, wy in enumerate((y + h - 30, y + h - 20, y + h - 10)):
-        page.hline(x + 60 + i * 40, wy, w - 120 - i * 40, CREAM, 2)
+    for i, wy in enumerate((oy + oh - 30, oy + oh - 20, oy + oh - 10)):
+        page.hline(ox + 60 + i * 40, wy, ow - 120 - i * 40, CREAM, 2)
 
 
 def draw_middle_row(page):
@@ -794,27 +798,27 @@ def draw_rocket(page, cx, cy, r):
                   GOLD_BRIGHT)
 
 
-def draw_trophy(page, x, y, w, h):
+def draw_trophy(page, ox, oy, ow, oh):
     """Navy panel with a gold Africa Cup trophy under a star."""
-    page.rect(x, y, w, h, NAVY)
-    page.disc(x + w - 26, y + 22, 4, GOLD_BRIGHT)
-    page.disc(x + 24, y + 18, 3, WHITE)
-    page.disc(x + 40, y + 30, 2, WHITE)
-    cx = x + w // 2
+    page.rect(ox, oy, ow, oh, NAVY)
+    page.disc(ox + ow - 26, oy + 22, 4, GOLD_BRIGHT)
+    page.disc(ox + 24, oy + 18, 3, WHITE)
+    page.disc(ox + 40, oy + 30, 2, WHITE)
+    cx = ox + ow // 2
     # star above the cup
-    page.disc(cx, y + 18, 4, GOLD_BRIGHT)
-    page.rect(cx - 9, y + 17, 18, 2, GOLD_BRIGHT)
-    page.rect(cx - 1, y + 9, 2, 18, GOLD_BRIGHT)
+    page.disc(cx, oy + 18, 4, GOLD_BRIGHT)
+    page.rect(cx - 9, oy + 17, 18, 2, GOLD_BRIGHT)
+    page.rect(cx - 1, oy + 9, 2, 18, GOLD_BRIGHT)
     # cup
-    page.rect(cx - 24, y + 30, 48, 34, GOLD)
-    page.rect(cx - 24, y + 30, 48, 8, GOLD_BRIGHT)
+    page.rect(cx - 24, oy + 30, 48, 34, GOLD)
+    page.rect(cx - 24, oy + 30, 48, 8, GOLD_BRIGHT)
     # handles
-    page.ring(cx - 30, y + 46, 10, GOLD, 3)
-    page.ring(cx + 30, y + 46, 10, GOLD, 3)
+    page.ring(cx - 30, oy + 46, 10, GOLD, 3)
+    page.ring(cx + 30, oy + 46, 10, GOLD, 3)
     # stem and base
-    page.rect(cx - 5, y + 64, 10, 22, GOLD)
-    page.rect(cx - 22, y + 86, 44, 8, GOLD_BRIGHT)
-    page.rect(cx - 28, y + 94, 56, 8, GOLD)
+    page.rect(cx - 5, oy + 64, 10, 22, GOLD)
+    page.rect(cx - 22, oy + 86, 44, 8, GOLD_BRIGHT)
+    page.rect(cx - 28, oy + 94, 56, 8, GOLD)
 
 
 def draw_bottom_row(page):
@@ -863,15 +867,18 @@ def draw_footer(page):
 
 def build_page():
     page = Page(WIDTH, HEIGHT, CREAM)
-    page.rect(0, 0, WIDTH, 8, NAVY)
-    page.rect(0, HEIGHT - 8, WIDTH, 8, NAVY)
-    page.rect(0, 0, 8, HEIGHT, NAVY)
-    page.rect(WIDTH - 8, 0, 8, HEIGHT, NAVY)
-    draw_masthead(page)
-    draw_top_story(page)
-    draw_middle_row(page)
-    draw_bottom_row(page)
-    draw_footer(page)
+    for edge in ("top", "bottom", "left", "right"):
+        if edge == "top":
+            page.rect(0, 0, WIDTH, 8, NAVY)
+        elif edge == "bottom":
+            page.rect(0, HEIGHT - 8, WIDTH, 8, NAVY)
+        elif edge == "left":
+            page.rect(0, 0, 8, HEIGHT, NAVY)
+        else:
+            page.rect(WIDTH - 8, 0, 8, HEIGHT, NAVY)
+    for section in (draw_masthead, draw_top_story, draw_middle_row,
+                    draw_bottom_row, draw_footer):
+        section(page)
     return page
 
 
