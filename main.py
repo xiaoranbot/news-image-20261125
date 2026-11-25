@@ -65,7 +65,7 @@ def encode_png(rgb, width, height):
         b"IEND", b"")
 
 
-# ------------------------------------------------------------- bitmap font
+# ------------------------------------------------------------ bitmap font
 
 # Hand-drawn 5x7 pixel glyphs. Each glyph is seven rows of five cells;
 # '#' is ink, '.' is blank. Only the characters the page needs are here.
@@ -507,6 +507,7 @@ GLYPHS.update({
     ),
 })
 
+
 # ------------------------------------------------------------ canvas
 
 CHAR_W = 6  # 5 glyph columns + 1 column of tracking, in font units
@@ -888,4 +889,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
